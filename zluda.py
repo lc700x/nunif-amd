@@ -15,8 +15,6 @@ os.environ['DISABLE_ADDMM_CUDA_LT'] = '1'
 
 import torch
 
-
-
 # ------------------- ZLUDA Detection -------------------
 zluda_device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else ""
 is_zluda = zluda_device_name.endswith("[ZLUDA]")
@@ -55,7 +53,6 @@ if is_zluda:
     torch.topk = safe_topk
 # ------------------- End Top-K Patch -------------------
 
-
 # ------------------- ZLUDA Backend Patch -------------------
 if is_zluda:
     print("  ::  ZLUDA detected, disabling non-supported functions.      ")
@@ -71,8 +68,6 @@ if is_zluda:
  
 if is_zluda:
     print(f"  ::  Using ZLUDA with device: {zluda_device_name}")
-#    print("***--------------------------------------------------------***\n")
 else:
     print(f"  ::  CUDA device detected: {zluda_device_name or 'None'}")
-#    print("***--------------------------------------------------------***\n")
 # ------------------- End Zluda detection -------------------
