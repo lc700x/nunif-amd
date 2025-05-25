@@ -58,5 +58,4 @@ NOTES ::::
 - Run iw3z.bat to start iw3 with amd gpu support.
 - CLI can also be used, to use it first you have enable venv , go into nunif-amd folder in commandline, "venv\scripts\activate" enter , now you can see the available parameters with "zluda\zluda.exe -- python -m iw3 -h" then use them to generate from the command prompt.
 
-******** The first time you select a model and generate, (only a new type of model) it would seem like your computer is doing nothing, 
-******** that's normal , zluda is creating a database for future use. That only happens once for every new type of model.
+******** The first time you select a model and generate, (only a new type of model) it would seem like your computer is doing nothing, that's normal , zluda is creating a database for future use. That only happens once for every new type of model. You will see "Compilation in progress..." a few times.
