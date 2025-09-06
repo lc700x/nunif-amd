@@ -27,11 +27,15 @@ from nunif.gui import (
     persistent_manager_restore_all, persistent_manager_register,
     validate_number,
     set_icon_ex, load_icon, start_file,
+    apply_dark_mode, is_dark_mode,
 )
 from ..depth_anything_model import DepthAnythingModel
+from ..video_depth_anything_streaming_model import VideoDepthAnythingStreamingModel
 from ..locales import LOCALES, load_language_setting, save_language_setting
 from .utils import (
     get_local_address,
+    is_private_address,
+    is_loopback_address,
     init_win32,
     iw3_desktop_main,
     create_parser, set_state_args,
@@ -124,6 +128,8 @@ class MainFrame(wx.Frame):
         self.args = None
         self.args_lock = threading.Lock()
         self.initialize_component()
+        if is_dark_mode():
+            apply_dark_mode(self)
 
     def initialize_component(self):
         NORMAL_FONT = wx.Font(10, family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)
@@ -164,14 +170,18 @@ class MainFrame(wx.Frame):
         self.lbl_synthetic_view = wx.StaticText(self.grp_stereo, label=T("Synthetic View"))
         self.cbo_synthetic_view = wx.ComboBox(self.grp_stereo,
                                               choices=["both", "right", "left"],
-                                              style=wx.CB_READONLY, name="cbo_synthetic_view")
+                                              name="cbo_synthetic_view")
+        self.cbo_synthetic_view.SetEditable(False)
         self.cbo_synthetic_view.SetSelection(0)
 
         self.lbl_method = wx.StaticText(self.grp_stereo, label=T("Method"))
         self.cbo_method = wx.ComboBox(self.grp_stereo,
-                                      choices=["row_flow_v3", "row_flow_v3_sym", "row_flow_v2", "forward_fill"],
-                                      style=wx.CB_READONLY, name="cbo_method")
-        self.cbo_method.SetSelection(0)
+                                      choices=["mlbw_l2", "mlbw_l4", "mlbw_l2s",
+                                               "row_flow_v3", "row_flow_v3_sym", "row_flow_v2",
+                                               "forward_fill"],
+                                      name="cbo_method")
+        self.cbo_method.SetEditable(False)
+        self.cbo_method.SetSelection(4)
 
         self.chk_small_model_only = wx.CheckBox(self.grp_stereo, label=T("List small model only"), name="chk_small_model_only")
         self.chk_small_model_only.SetValue(True)
@@ -180,7 +190,8 @@ class MainFrame(wx.Frame):
         depth_models = self.get_depth_models(small_only=False)
         self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
                                            choices=depth_models,
-                                           style=wx.CB_READONLY, name="cbo_depth_model")
+                                           name="cbo_depth_model")
+        self.cbo_depth_model.SetEditable(False)
         self.cbo_depth_model.SetSelection(depth_models.index("Any_V2_S"))
 
         self.lbl_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
@@ -209,7 +220,7 @@ class MainFrame(wx.Frame):
                                              name="chk_ema_normalize")
         self.chk_ema_normalize.SetValue(True)
         self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
-        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.9", "0.75", "0.5"],
+        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.95", "0.9", "0.75", "0.5"],
                                               name="cbo_ema_decay")
         self.cbo_ema_decay.SetSelection(2)
         self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
@@ -223,8 +234,9 @@ class MainFrame(wx.Frame):
         self.lbl_stereo_format = wx.StaticText(self.grp_stereo, label=T("Stereo Format"))
         self.cbo_stereo_format = wx.ComboBox(
             self.grp_stereo,
-            choices=["Half SBS", "Full SBS"],
-            style=wx.CB_READONLY, name="cbo_stereo_format")
+            choices=["Half SBS", "Full SBS", "RGB-D", "Half RGB-D"],
+            name="cbo_stereo_format")
+        self.cbo_stereo_format.SetEditable(False)
         self.cbo_stereo_format.SetSelection(0)
         self.lbl_format_device = wx.StaticText(self.grp_stereo, label=T(""))
 
@@ -265,13 +277,23 @@ class MainFrame(wx.Frame):
         if LAYOUT_DEBUG:
             self.grp_network.SetBackgroundColour("#fcf")
 
+        self.lbl_view_mode = wx.StaticText(self.grp_network, label=T("View Mode"))
+        self.cbo_view_mode = wx.ComboBox(self.grp_network, choices=["Web Streaming", "Local Viewer"],
+                                         name="cbo_view_mode")
+        self.cbo_view_mode.SetEditable(False)
+        self.cbo_view_mode.SetSelection(0)
+
         self.chk_bind_addr = wx.CheckBox(self.grp_network, label=T("Address"), name="chk_bind_addr")
         self.txt_bind_addr = IpAddrCtrl(self.grp_network, size=self.FromDIP((200, -1)), name="txt_bind_addr")
-
         self.chk_bind_addr.SetValue(False)
         self.txt_bind_addr.SetValue("127.0.0.1")
         self.btn_detect_ip = GenBitmapButton(self.grp_network, bitmap=load_icon("view-refresh.png"))
         self.btn_detect_ip.SetToolTip(T("Detect"))
+
+        self.lbl_bind_addr_warning = stattext.GenStaticText(self.grp_network, label="")
+        self.lbl_bind_addr_warning.SetFont(WARNING_FONT)
+        self.lbl_bind_addr_warning.SetForegroundColour(WARNING_COLOR)
+        self.lbl_bind_addr_warning.Hide()
 
         self.lbl_port = wx.StaticText(self.grp_network, label=T("Port"))
         self.txt_port = IntCtrl(self.grp_network, size=self.FromDIP((200, -1)),
@@ -291,10 +313,14 @@ class MainFrame(wx.Frame):
         self.cbo_stream_quality = EditableComboBox(self.grp_network, choices=["100", "95", "90", "85", "80"],
                                                    name="cbo_stream_quality")
         self.cbo_stream_quality.SetSelection(2)
+        self.chk_pad_16_9 = wx.CheckBox(self.grp_network, label=T("Padding") + " 16:9", name="chk_pad_16_9")
+        self.chk_pad_16_9.SetValue(False)
+
         self.chk_gpu_jpeg = wx.CheckBox(self.grp_network, label=T("GPU JPEG"), name="chk_gpu_jpeg")
         self.chk_gpu_jpeg.SetValue(False)
         if not ENABLE_GPU_JPEG:
             self.chk_gpu_jpeg.Disable()
+        self.sep_network1 = wx.StaticLine(self.grp_network, style=wx.LI_HORIZONTAL)
 
         self.chk_auth = wx.CheckBox(self.grp_network, label=T("Basic Authentication"), name="chk_auth")
         self.lbl_auth_username = wx.StaticText(self.grp_network, label=T("Username"))
@@ -304,24 +330,31 @@ class MainFrame(wx.Frame):
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
-        layout.Add(self.chk_bind_addr, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_bind_addr, (0, 1), flag=wx.EXPAND)
-        layout.Add(self.btn_detect_ip, (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.lbl_port, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_port, (1, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_stream_fps, (2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_stream_fps, (2, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_stream_height, (3, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_stream_height, (3, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_stream_quality, (4, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_stream_quality, (4, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_gpu_jpeg, (5, 1), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_view_mode, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_view_mode, (0, 1), flag=wx.EXPAND)
 
-        layout.Add(self.chk_auth, (6, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.lbl_auth_username, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_auth_username, (7, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_auth_password, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_auth_password, (8, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_bind_addr, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bind_addr, (1, 1), flag=wx.EXPAND)
+        layout.Add(self.btn_detect_ip, (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_bind_addr_warning, (2, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_port, (3, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_port, (3, 1), flag=wx.EXPAND)
+
+        layout.Add(self.lbl_stream_fps, (4, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_stream_fps, (4, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_stream_height, (5, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_stream_height, (5, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_stream_quality, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_stream_quality, (6, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_gpu_jpeg, (7, 1), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_pad_16_9, (8, 1), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.sep_network1, (9, 0), (0, 3), flag=wx.EXPAND | wx.ALL)
+
+        layout.Add(self.chk_auth, (10, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_auth_username, (11, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_auth_username, (11, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_auth_password, (12, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_auth_password, (12, 1), flag=wx.EXPAND)
 
         sizer_network = wx.StaticBoxSizer(self.grp_network, wx.VERTICAL)
         sizer_network.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -332,8 +365,8 @@ class MainFrame(wx.Frame):
             self.grp_processor.SetBackgroundColour("#fcf")
 
         self.lbl_device = wx.StaticText(self.grp_processor, label=T("Device"))
-        self.cbo_device = wx.ComboBox(self.grp_processor, size=self.FromDIP((200, -1)), style=wx.CB_READONLY,
-                                      name="cbo_device")
+        self.cbo_device = wx.ComboBox(self.grp_processor, size=self.FromDIP((200, -1)), name="cbo_device")
+        self.cbo_device.SetEditable(False)
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 device_name = torch.cuda.get_device_properties(i).name
@@ -350,18 +383,20 @@ class MainFrame(wx.Frame):
 
         self.lbl_screenshot = wx.StaticText(self.grp_processor, label=T("Screenshot"))
         screenshot_backends = ["pil", "pil_mp"] + (["wc_mp"] if HAS_WINDOWS_CAPTURE else [])
-        self.cbo_screenshot = wx.ComboBox(self.grp_processor, style=wx.CB_READONLY,
+        self.cbo_screenshot = wx.ComboBox(self.grp_processor,
                                           choices=screenshot_backends,
                                           name="cbo_screenshot")
+        self.cbo_screenshot.SetEditable(False)
         if sys.platform == "win32" and HAS_WINDOWS_CAPTURE:
             self.cbo_screenshot.SetSelection(2)
         else:
             self.cbo_screenshot.SetSelection(0)
 
         self.lbl_monitor_index = wx.StaticText(self.grp_processor, label=T("Monitor Index"))
-        self.cbo_monitor_index = wx.ComboBox(self.grp_processor, style=wx.CB_READONLY,
+        self.cbo_monitor_index = wx.ComboBox(self.grp_processor,
                                              choices=[str(i) for i in range(len(get_monitor_size_list()))],
                                              name="cbo_monitor_index")
+        self.cbo_monitor_index.SetEditable(False)
         self.cbo_monitor_index.SetSelection(0)
 
         self.lbl_window_name = wx.StaticText(self.grp_processor, label=T("Window Name"))
@@ -370,6 +405,28 @@ class MainFrame(wx.Frame):
         self.cbo_window_name.SetSelection(0)
         self.btn_reload_window_name = GenBitmapButton(self.grp_processor, bitmap=load_icon("view-refresh.png"))
         self.btn_reload_window_name.SetToolTip(T("Reload"))
+
+        self.lbl_crop_region = wx.StaticText(self.grp_processor, label=T("Crop Region (px)"))
+
+        self.lbl_crop_top = wx.StaticText(self.grp_processor, label=T("Top"))
+        self.txt_crop_top = IntCtrl(self.grp_processor, size=self.FromDIP((60, -1)),
+                                    allow_none=False, min=0, max=500, name="txt_crop_top")
+        self.txt_crop_top.SetValue(0)
+
+        self.lbl_crop_left = wx.StaticText(self.grp_processor, label=T("Left"))
+        self.txt_crop_left = IntCtrl(self.grp_processor, size=self.FromDIP((60, -1)),
+                                     allow_none=False, min=0, max=500, name="txt_crop_left")
+        self.txt_crop_left.SetValue(0)
+
+        self.lbl_crop_right = wx.StaticText(self.grp_processor, label=T("Right"))
+        self.txt_crop_right = IntCtrl(self.grp_processor, size=self.FromDIP((60, -1)),
+                                      allow_none=False, min=0, max=500, name="txt_crop_right")
+        self.txt_crop_right.SetValue(0)
+
+        self.lbl_crop_bottom = wx.StaticText(self.grp_processor, label=T("Bottom"))
+        self.txt_crop_bottom = IntCtrl(self.grp_processor, size=self.FromDIP((60, -1)),
+                                       allow_none=False, min=0, max=500, name="txt_crop_bottom")
+        self.txt_crop_bottom.SetValue(0)
 
         self.chk_compile = wx.CheckBox(self.grp_processor, label=T("torch.compile"), name="chk_compile")
         self.chk_compile.SetToolTip(T("Enable model compiling"))
@@ -386,7 +443,21 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_window_name, (3, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_window_name, (3, 1), flag=wx.EXPAND)
         layout.Add(self.btn_reload_window_name, (3, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_compile, (4, 0), flag=wx.EXPAND)
+        layout.Add(self.lbl_crop_region, (4, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+
+        # Create a sub-layout for crop controls
+        crop_layout = wx.GridBagSizer(vgap=2, hgap=4)
+        crop_layout.Add(self.lbl_crop_top, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        crop_layout.Add(self.txt_crop_top, (0, 1), flag=wx.EXPAND)
+        crop_layout.Add(self.lbl_crop_left, (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        crop_layout.Add(self.txt_crop_left, (0, 3), flag=wx.EXPAND)
+        crop_layout.Add(self.lbl_crop_right, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        crop_layout.Add(self.txt_crop_right, (1, 1), flag=wx.EXPAND)
+        crop_layout.Add(self.lbl_crop_bottom, (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        crop_layout.Add(self.txt_crop_bottom, (1, 3), flag=wx.EXPAND)
+
+        layout.Add(crop_layout, (4, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_compile, (5, 0), flag=wx.EXPAND)
 
         sizer_processor = wx.StaticBoxSizer(self.grp_processor, wx.VERTICAL)
         sizer_processor.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -491,6 +562,8 @@ class MainFrame(wx.Frame):
         self.chk_edge_dilation.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_edge_dilation)
         self.chk_ema_normalize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_normalize)
         self.chk_bind_addr.Bind(wx.EVT_CHECKBOX, self.update_bind_addr_state)
+        self.txt_bind_addr.Bind(wx.EVT_TEXT, self.update_bind_addr_warning)
+        self.lbl_bind_addr_warning.Bind(wx.EVT_LEFT_DOWN, self.on_click_bind_addr_warning)
         self.chk_auth.Bind(wx.EVT_CHECKBOX, self.update_auth_state)
         self.cbo_stereo_format.Bind(wx.EVT_TEXT, self.update_stereo_format)
         self.cbo_screenshot.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_screenshot)
@@ -503,6 +576,8 @@ class MainFrame(wx.Frame):
         self.sld_adj_convergence.Bind(wx.EVT_SPINCTRLDOUBLE, self.update_args_adjustment)
         self.sld_adj_edge_dilation.Bind(wx.EVT_SPINCTRL, self.update_args_adjustment)
         self.sld_adj_foreground_scale.Bind(wx.EVT_SPINCTRLDOUBLE, self.update_args_adjustment)
+
+        self.cbo_view_mode.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_view_mode)
 
         self.btn_detect_ip.Bind(wx.EVT_BUTTON, self.on_click_btn_detect_ip)
         self.btn_url.Bind(wx.EVT_BUTTON, self.on_click_btn_url)
@@ -520,6 +595,7 @@ class MainFrame(wx.Frame):
         self.load_preset()
 
         self.update_bind_addr_state()
+        self.update_bind_addr_warning()
         self.update_depth_model_list()
         self.update_stereo_format()
         self.update_auth_state()
@@ -528,6 +604,7 @@ class MainFrame(wx.Frame):
         self.update_ema_normalize()
         self.update_divergence_warning()
         self.update_preserve_screen_border()
+        self.update_view_mode()
         self.update_monitor_index()
         self.update_window_names()
         self.update_compile()
@@ -537,7 +614,7 @@ class MainFrame(wx.Frame):
 
     def get_depth_models(self, small_only):
         if small_only:
-            return ["Any_S", "Any_V2_S", "Any_V2_N_S", "Distill_Any_S"]
+            return ["Any_S", "Any_V2_S", "Any_V2_N_S", "Distill_Any_S", "VDA_Stream_S"]
         else:
             depth_models = [
                 "ZoeD_N", "ZoeD_K", "ZoeD_NK",
@@ -563,6 +640,10 @@ class MainFrame(wx.Frame):
             if DepthAnythingModel.has_checkpoint_file("Distill_Any_L"):
                 depth_models.append("Distill_Any_L")
 
+            depth_models += ["VDA_Stream_S"]
+            if VideoDepthAnythingStreamingModel.has_checkpoint_file("VDA_Stream_L"):
+                depth_models.append("VDA_Stream_L")
+
             return depth_models
 
     def get_editable_comboboxes(self):
@@ -579,15 +660,19 @@ class MainFrame(wx.Frame):
         return editable_comboboxes
 
     def on_close(self, event):
+        self.save_preset()
+        event.Skip()
+
+        self.stop_event.set()
         if self.processing:
-            self.stop_event.set()
-            max_wait = int(4 / 0.01)
+            max_wait = int(6 / 0.01)
             for _ in range(max_wait):
                 if not self.stop_event.is_set():
                     break
                 time.sleep(0.01)
-        self.save_preset()
-        event.Skip()
+            if self.stop_event.is_set():
+                # It may be deadlocked, so force exit
+                os._exit(-1)
 
     def update_depth_model_list(self, *args, **kwargs):
         default_model = "Any_V2_S"
@@ -650,6 +735,24 @@ class MainFrame(wx.Frame):
         else:
             self.txt_bind_addr.Enable()
 
+    def update_bind_addr_warning(self, *args, **kwargs):
+        bind_addr = self.txt_bind_addr.GetAddress()
+        if is_loopback_address(bind_addr):
+            self.lbl_bind_addr_warning.SetLabel(f"{bind_addr} is only accessible from this PC.")
+            self.lbl_bind_addr_warning.Show()
+        elif not is_private_address(bind_addr):
+            self.lbl_bind_addr_warning.SetLabel(f"{bind_addr} is not Local Area Network Address.")
+            self.lbl_bind_addr_warning.Show()
+        else:
+            self.lbl_bind_addr_warning.SetLabel("")
+            self.lbl_bind_addr_warning.Hide()
+
+        self.GetSizer().Layout()
+
+    def on_click_bind_addr_warning(self, event):
+        self.lbl_bind_addr_warning.Hide()
+        self.GetSizer().Layout()
+
     def update_auth_state(self, *args, **kwargs):
         if self.chk_auth.IsChecked():
             self.txt_auth_username.Enable()
@@ -665,7 +768,7 @@ class MainFrame(wx.Frame):
         elif stereo_format == "Full SBS":
             self.lbl_format_device.SetLabel("PICO 4")
         else:
-            self.lbl_format_device.SetText("")
+            self.lbl_format_device.SetLabel("")
 
     def update_edge_dilation(self):
         if self.chk_edge_dilation.IsChecked():
@@ -677,7 +780,8 @@ class MainFrame(wx.Frame):
         self.update_edge_dilation()
 
     def update_preserve_screen_border(self):
-        if self.cbo_method.GetValue() in {"row_flow_v2", "row_flow_v3", "row_flow_v3_sym"}:
+        if self.cbo_method.GetValue() in {"row_flow_v2", "row_flow_v3", "row_flow_v3_sym",
+                                          "mlbw_l2", "mlbw_l4", "mlbw_l2s", "mlbw_l4s"}:
             self.chk_preserve_screen_border.Enable()
         else:
             self.chk_preserve_screen_border.Disable()
@@ -740,6 +844,16 @@ class MainFrame(wx.Frame):
             self.show_validation_error_message(T("Port"), 1025, 65535)
             return None
 
+        crop_top = self.txt_crop_top.GetValue()
+        crop_left = self.txt_crop_left.GetValue()
+        crop_right = self.txt_crop_right.GetValue()
+        crop_bottom = self.txt_crop_bottom.GetValue()
+
+        for crop_name, crop_value in [("Top", crop_top), ("Left", crop_left), ("Right", crop_right), ("Bottom", crop_bottom)]:
+            if not validate_number(str(crop_value), 0, 500, is_int=True, allow_empty=False):
+                self.show_validation_error_message(T("Crop") + " " + T(crop_name), 0, 500)
+                return None
+
         resolution = self.cbo_resolution.GetValue()
         if resolution == "Default" or resolution == "":
             resolution = None
@@ -751,6 +865,8 @@ class MainFrame(wx.Frame):
 
         parser = create_parser()
         full_sbs = self.cbo_stereo_format.GetValue() == "Full SBS"
+        rgbd = self.cbo_stereo_format.GetValue() == "RGB-D"
+        half_rgbd = self.cbo_stereo_format.GetValue() == "Half RGB-D"
         device_id = int(self.cbo_device.GetClientData(self.cbo_device.GetSelection()))
         device_id = [device_id]
 
@@ -779,6 +895,26 @@ class MainFrame(wx.Frame):
         if not window_name:
             window_name = None
 
+        pad_mode = "16:9" if self.chk_pad_16_9.IsChecked() else None
+        local_viewer = self.cbo_view_mode.GetValue() == "Local Viewer"
+        if local_viewer:
+            viewer_kwargs = dict(
+                local_viewer=True,
+                stream_fps=int(self.cbo_stream_fps.GetValue()),
+                stream_height=int(self.cbo_stream_height.GetValue()),
+            )
+        else:
+            viewer_kwargs = dict(
+                bind_addr=bind_addr,
+                port=self.txt_port.GetValue(),
+                user=user,
+                password=password,
+                stream_fps=int(self.cbo_stream_fps.GetValue()),
+                stream_height=int(self.cbo_stream_height.GetValue()),
+                stream_quality=int(self.cbo_stream_quality.GetValue()),
+                gpu_jpeg=self.chk_gpu_jpeg.IsEnabled() and self.chk_gpu_jpeg.IsChecked(),
+            )
+
         parser.set_defaults(
             gpu=device_id,
             divergence=float(self.cbo_divergence.GetValue()),
@@ -794,18 +930,19 @@ class MainFrame(wx.Frame):
             resolution=resolution,
             compile=self.chk_compile.IsEnabled() and self.chk_compile.IsChecked(),
 
-            bind_addr=bind_addr,
-            port=self.txt_port.GetValue(),
-            user=user,
-            password=password,
-            stream_fps=int(self.cbo_stream_fps.GetValue()),
-            stream_height=int(self.cbo_stream_height.GetValue()),
-            stream_quality=int(self.cbo_stream_quality.GetValue()),
-            gpu_jpeg=self.chk_gpu_jpeg.IsEnabled() and self.chk_gpu_jpeg.IsChecked(),
             screenshot=self.cbo_screenshot.GetValue(),
             monitor_index=monitor_index,
             window_name=window_name,
+            crop_top=crop_top,
+            crop_left=crop_left,
+            crop_right=crop_right,
+            crop_bottom=crop_bottom,
             full_sbs=full_sbs,
+            rgbd=rgbd,
+            half_rgbd=half_rgbd,
+            pad_mode=pad_mode,
+
+            **viewer_kwargs,
         )
         args = parser.parse_args()
         set_state_args(
@@ -950,6 +1087,11 @@ class MainFrame(wx.Frame):
                     max_divergence = 2.5
                 else:
                     max_divergence = 2.5 * 0.5
+            elif method in {"mlbw_l2", "mlbw_l4", "mlbw_l2s", "mlbw_l4s"}:
+                if synthetic_view == "both":
+                    max_divergence = 10.0
+                else:
+                    max_divergence = 10.0 * 0.5
 
             if divergence > max_divergence:
                 self.lbl_divergence_warning.SetLabel(
@@ -1010,13 +1152,62 @@ class MainFrame(wx.Frame):
             self.lbl_window_name.Show()
             self.cbo_window_name.Show()
             self.btn_reload_window_name.Show()
+            self.lbl_crop_region.Show()
+            self.txt_crop_top.Show()
+            self.lbl_crop_top.Show()
+            self.txt_crop_left.Show()
+            self.lbl_crop_left.Show()
+            self.txt_crop_right.Show()
+            self.lbl_crop_right.Show()
+            self.txt_crop_bottom.Show()
+            self.lbl_crop_bottom.Show()
             self.cbo_window_name.SetItems([""] + enum_window_names())
         else:
             self.lbl_window_name.Hide()
             self.cbo_window_name.Hide()
             self.btn_reload_window_name.Hide()
+            self.lbl_crop_region.Hide()
+            self.txt_crop_top.Hide()
+            self.lbl_crop_top.Hide()
+            self.txt_crop_left.Hide()
+            self.lbl_crop_left.Hide()
+            self.txt_crop_right.Hide()
+            self.lbl_crop_right.Hide()
+            self.txt_crop_bottom.Hide()
+            self.lbl_crop_bottom.Hide()
 
         self.GetSizer().Layout()
+
+    def on_text_changed_cbo_view_mode(self, event):
+        self.update_view_mode()
+
+    def update_view_mode(self, *args, **kwargs):
+        local_viewer = self.cbo_view_mode.GetValue() == "Local Viewer"
+        streaming_options = [
+            self.chk_bind_addr,
+            self.txt_bind_addr,
+            self.btn_detect_ip,
+            self.lbl_port,
+            self.txt_port,
+            self.lbl_stream_quality,
+            self.cbo_stream_quality,
+            self.chk_gpu_jpeg,
+            self.sep_network1,
+            self.chk_auth,
+            self.lbl_auth_username,
+            self.txt_auth_username,
+            self.lbl_auth_password,
+            self.txt_auth_password,
+        ]
+        if local_viewer:
+            for control in streaming_options:
+                control.Hide()
+        else:
+            for control in streaming_options:
+                control.Show()
+
+        self.GetSizer().Layout()
+        self.Fit()
 
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
