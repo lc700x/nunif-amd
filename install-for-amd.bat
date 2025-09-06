@@ -15,12 +15,12 @@ Call "%VIRTUAL_ENV%\Scripts\activate.bat"
 echo - Updating the pip package 
 python.exe -m pip install --upgrade pip --quiet
 echo.
-echo - Installing torch for AMD GPUs (Using latest torch 2.7.0)
-pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu118 --quiet
-echo.
 echo - Installing necessary packages
 pip install -r requirements.txt --quiet
 pip install -r requirements-gui.txt --quiet
+echo.
+echo - Installing torch for AMD GPUs (Using latest torch 2.7.0)
+pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu118 --quiet
 echo.
 echo - Downloading models
 echo.
@@ -42,3 +42,4 @@ echo ******** The first time you select a model and generate, (only a new type o
 echo ******** that's normal , zluda is creating a database for future use. That only happens once for every new type of model.
 echo ******** you will see a few "compilation in progress..." message, wait for a while.
 pause
+
